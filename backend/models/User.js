@@ -16,3 +16,4 @@ userSchema.methods.validatePassword = function(plain){
 };
 
 module.exports = mongoose.model('User', userSchema);
+// ... inside new Schema({...})
