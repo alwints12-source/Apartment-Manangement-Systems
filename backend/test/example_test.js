@@ -1,16 +1,18 @@
-
 const chai = require('chai');
-const chaiHttp = require('chai-http');
+const chaiHttpModule = require('chai-http');   // may export as default
+const chaiHttp = chaiHttpModule.default || chaiHttpModule; // normalize plugin
+
 const http = require('http');
 const app = require('../server'); 
 const connectDB = require('../config/db');
 const mongoose = require('mongoose');
 const sinon = require('sinon');
-const Task = require('../models/Task');
-const { updateTask,getTasks,addTask,deleteTask } = require('../controllers/taskController');
+const Task = require('../models/task');
+const { updateTask, getTasks, addTask, deleteTask } = require('../controllers/taskcontroller');
 const { expect } = chai;
 
 chai.use(chaiHttp);
+
 let server;
 let port;
 
