@@ -2,79 +2,144 @@ name: Backend CI
 
 on:
   push:
-    branches:
-      - main  # Trigger CI on pushes to the main branch
-
+    branches: [ main ]
 
 jobs:
   test:
-    name: Run Tests
+    name: Run Tests + Build + Deploy
     runs-on: self-hosted
 
     strategy:
       matrix:
-        node-version: [22] # Test on multiple Node.js versions
-
-
-    environment: MONGO_URI
+        node-version: [22]
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      # 1) Checkout
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-    # Set up Node.js
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: ${{ matrix.node-version }}
+      # 2) Node setup (cache yarn if present)
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'yarn'
+          cache-dependency-path: |
+            backend/yarn.lock
+            frontend/yarn.lock
 
-    - name: Print Env Secret
+      # 3) Ensure global CLIs available on runner
+      - name: Install global CLIs (pm2, yarn, serve)
+        run: |
+          npm i -g pm2 yarn serve
+          pm2 -v
+          yarn -v
+          serve -v || true
 
-      env:
-        MONGO_URI: ${{ secrets.MONGO_URI }}
-        JWT_SECRET: ${{ secrets.JWT_SECRET }}
-        PORT: ${{ secrets.PORT }}
-      run: | 
-        echo "Secret 1 is: $MONGO_URI"
-        echo "Secret 2 is: $JWT_SECRET"
-        echo "Secret 3 is: $PORT"
-      
-    - run: pm2 stop all || true
+      # 4) Stop anything already running (ignore errors)
+      - name: Stop PM2 apps (if running)
+        run: pm2 stop all || true
 
-    # Install dependencies for backend
-    - name: Install Backend Dependencies
-      working-directory: ./backend
-      run: | 
-       npm install --global yarn
-       yarn --version
-       yarn install
-      
-    # Install dependencies for frontend
-    - name: Install Frontend Dependencies
-      working-directory: ./frontend
-      run: |
-        df -h
-        sudo rm -rf ./build
-        yarn install
-        yarn run build
+      # 5) Install backend deps (prefer yarn, fallback to npm)
+      - name: Install Backend Dependencies
+        working-directory: ./backend
+        run: |
+          if [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          else
+            if [ -f package-lock.json ]; then
+              npm ci
+            else
+              npm install
+            fi
+          fi
 
+      # 6) Run backend tests (only if test script exists)
+      - name: Run Backend Tests
+        working-directory: ./backend
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          PORT: ${{ secrets.PORT }}
+          NODE_ENV: test
+        run: |
+          if grep -q '"test"' package.json; then
+            # prefer yarn if lockfile is present
+            if [ -f yarn.lock ]; then
+              yarn test
+            else
+              npm test
+            fi
+          else
+            echo "No backend test script found; skipping."
+          fi
 
-    # Run backend tests
-    - name: Run Backend Tests
-      env:
-        MONGO_URI: "mongodb+srv://alwints12:p3vUwkLscYZBFWN8@cluster0.nqpwsad.mongodb.net/ams?retryWrites=true&w=majority&appName=cluster0"
-        JWT_SECRET: "2J8zqkP7VN6bxzg+Wy7DQZsd3Yx8mF3Bl0kch6HYtFs="
-        PORT: 5001
-      working-directory: ./backend
-      run: npm test
+      # 7) Build frontend (clean build dir first)
+      - name: Install Frontend Dependencies & Build
+        working-directory: ./frontend
+        run: |
+          rm -rf build dist 2>/dev/null || true
+          if [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+            yarn build
+          else
+            if [ -f package-lock.json ]; then
+              npm ci
+            else
+              npm install
+            fi
+            npm run build
+          fi
 
+      # 8) Write backend .env from secret blob (if you keep a combined .env in PROD)
+      - name: Write backend .env from secret
+        working-directory: ./backend
+        run: |
+          # If secrets.PROD contains full .env content, write it; otherwise generate minimal .env
+          if [ -n "${{ secrets.PROD }}" ]; then
+            printf "%s" "${{ secrets.PROD }}" > .env
+          else
+            cat > .env <<EOF
+MONGO_URI=${{ secrets.MONGO_URI }}
+JWT_SECRET=${{ secrets.JWT_SECRET }}
+PORT=${{ secrets.PORT }}
+NODE_ENV=production
+EOF
+          fi
 
-    - run: npm ci
-    - run: | 
-        cd ./backend
-        touch .env
-        echo "${{ secrets.PROD }}" > .env
+      # 9) Start backend with PM2 (supports yarn or plain node entry points)
+      - name: Start backend with PM2
+        run: |
+          pm2 delete backend || true
+          BACKEND_DIR="$PWD/backend"
 
-    - run: pm2 start all
+          # Try yarn start if available; else guess a node entry file
+          if [ -f "$BACKEND_DIR/yarn.lock" ] && grep -q '"start"' "$BACKEND_DIR/package.json"; then
+            pm2 start "yarn start" --name backend --cwd "$BACKEND_DIR" --update-env
+          elif grep -q '"start"' "$BACKEND_DIR/package.json"; then
+            pm2 start "npm start" --name backend --cwd "$BACKEND_DIR" --update-env
+          elif [ -f "$BACKEND_DIR/server.js" ]; then
+            pm2 start "node server.js" --name backend --cwd "$BACKEND_DIR" --update-env
+          elif [ -f "$BACKEND_DIR/app.js" ]; then
+            pm2 start "node app.js" --name backend --cwd "$BACKEND_DIR" --update-env
+          else
+            echo "Cannot find a backend start command or entry file."
+            exit 1
+          fi
 
-    - run: pm2 restart all
+          pm2 save
+
+      # 10) Serve frontend via PM2 on port 5001
+      - name: Start frontend (port 5001) with PM2
+        working-directory: ./frontend
+        env:
+          FRONTEND_PORT: "5001"
+        run: |
+          pm2 delete frontend || true
+          # Serve the built static files (React/Vite/Next static export) on :5001
+          pm2 start "serve -s build -l $FRONTEND_PORT" --name frontend --cwd "$PWD"
+          pm2 save
+
+      # 11) PM2 status output
+      - name: PM2 Status
+        run: pm2 status
