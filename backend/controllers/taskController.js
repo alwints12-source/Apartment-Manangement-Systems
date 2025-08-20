@@ -1,5 +1,5 @@
 // backend/controllers/taskController.js
-const Task = require('../models/task'); // <-- Ensure file is backend/models/Task.js (capital T)
+const Task = require('../models/Task'); // <-- Ensure file is backend/models/Task.js (capital T)
 
 // @desc    Add new task
 // @route   POST /api/tasks
