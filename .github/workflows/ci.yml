@@ -5,7 +5,6 @@ on:
     branches:
       - main  # Trigger CI on pushes to the main branch
 
-
 jobs:
   test:
     name: Run Tests
@@ -13,10 +12,7 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [22] # Test on multiple Node.js versions
-
-
-    environment: MONGO_URI
+        node-version: [22] # Node.js version
 
     steps:
     - name: Checkout Code
@@ -29,7 +25,6 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - name: Print Env Secret
-
       env:
         MONGO_URI: ${{ secrets.MONGO_URI }}
         JWT_SECRET: ${{ secrets.JWT_SECRET }}
@@ -39,15 +34,15 @@ jobs:
         echo "Secret 2 is: $JWT_SECRET"
         echo "Secret 3 is: $PORT"
       
-    - run: pm2 stop all
+    - run: pm2 stop all || true
 
     # Install dependencies for backend
     - name: Install Backend Dependencies
       working-directory: ./backend
       run: | 
-       npm install --global yarn
-       yarn --version
-       yarn install
+        npm install --global yarn
+        yarn --version
+        yarn install
       
     # Install dependencies for frontend
     - name: Install Frontend Dependencies
@@ -58,23 +53,27 @@ jobs:
         yarn install
         yarn run build
 
+    # Write backend .env
+    -     # Write backend .env
+    - name: Write backend .env from secret
+      working-directory: ./backend
+      run: |
+        cat > .env <<EOF
+        MONGO_URI=${{ secrets.MONGO_URI }}
+        JWT_SECRET=${{ secrets.JWT_SECRET }}
+        PORT=${{ secrets.PORT }}
+        NODE_ENV=production
+        EOF
 
     # Run backend tests
     - name: Run Backend Tests
       env:
         MONGO_URI: ${{ secrets.MONGO_URI }}
         JWT_SECRET: ${{ secrets.JWT_SECRET }}
-        PORT: ${{ secrets.PORT }}
+        PORT: 5001
       working-directory: ./backend
       run: npm test
 
-
-    - run: npm ci
-    - run: | 
-        cd ./backend
-        touch .env
-        echo "${{ secrets.PROD }}" > .env
-
-    - run: pm2 start all
-
-    - run: pm2 restart all
+    # Start services with PM2
+    - run: pm2 start ./backend/server.js --name backend
+    - run: pm2 serve ./frontend/build 3000 --name frontend --spa
